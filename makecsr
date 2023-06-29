@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# Copyright 1996 - 2012 Luc Suryo <luc@suryo.com>.
+# Copyright 2012 - 2020 (c) Badassops LLC / Luc Suryo
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#	* Redistributions of source code must retain the above copyright
+#	notice, this list of conditions and the following disclaimer.
+#	* Redistributions in binary form must reproduce the above copyright
+#	notice, this list of conditions and the following disclaimer in the
+#	documentation and/or other materials provided with the distribution.
+#	* Neither the name of the <organization> nor the
+#	names of its contributors may be used to endorse or promote products
+#	derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSEcw
+# ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+#*
+#* File		:	makecsr
+#*
+#* Description	:	script to make a X500-SSL certificate request file
+#*
+#* Author	:	Luc Suryo <luc@badassops.com>
+#*
+#* Version	:	0.6
+#*
+#* Date		:	May 23, 2020
+#*
+#* History	:
+#* 		Date:				Author		Info:
+#*		March 1, 1996		LIS			First Release
+#*		July 20, 2010		LIS			New license
+#*		Aug 10, 2012		LIS			Set Copyright to Badassops LLC
+#*		Nov 23, 2015		LIS			Adjusted license and variable for Poynt
+#*										and made script with the standard setup
+#*		May 7, 2020			LIS			added color and better wildcard (*) support
+#*		May 21, 2020		LIS			fixed several bug and addd SAN suport
+#*		may 23, 2020		LIS			change to use libraries
+#*
+
+_program="${0##*/}"
+_author='Luc Suryo'
+_copyright="Copyright 2012 - $(date "+%Y") (c) Badassops LLC"
+_license='License BSD, http://www.freebsd.org/copyright/freebsd-license.html'
+_version='0.6'
+_email='luc@badassops.com'
+_summary='script to make a X500-SSL certificate request file'
+_cancelled="OK : Process has been cancelled on your request."
+_info="$_program $_version\n$_copyright\n$_license\n\nWritten by $_author <$_email>\n$_summary\n"
+_text_before_start="This script will create your certificate request and certificate key files, this is for in live production!"
+
+source lib/variables.var
+source lib/color.func
+source lib/cleanup.func
+source lib/check_is_root.func
+source lib/check_running.func
+source lib/make_env.func
+source lib/make_key.func
+source lib/make_csr.func
+source lib/check_csr.func
+source lib/decrypt_key.func
+source lib/create_it.func
+source lib/make_pass_file.func
+source lib/main.func
+
+# working variables
+_san_cert=0
+_my_cert_dir="./real_certs"
+
+function inthandler() {
+	echo $_echo_flag "\n$_color_bold_red\t!!! Something when wrong or Control-C was press, deleting all certs file for $_my_cert_name !!!$_reset_color"
+	clean_up_upon_fail
+	clean_up
+	echo $_echo_flag "$_cancelled"
+	exit 0
+}
+
+# Set interrupt handler
+trap inthandler 1 2 3 4 5 9 10 12 15 23 24 25
+
+function help() {
+	trap 1 2 3 4 5 9 10 12 15 23 24 25
+	echo $_echo_flag "$_info"
+	echo $_echo_flag "Usage : $_program [-h][-s] cert-domain"
+	echo $_echo_flag "\n\tUse the keyword $_color_bold_red wildcard$_reset_color,$_color_bold_red star$_reset_color or$_color_bold_red *$_reset_color, for wildcard cert"
+	echo $_echo_flag "\texample: $_program wildcard.suryo.com"
+	echo $_echo_flag "\n\tuse -s for a SAN supporting cert, default is no SAN."
+	echo $_echo_flag "\tyou can add up too 3 {sub}domains"
+	echo $_echo_flag "\texample: $_program -s wildcard.suryo.com alpha.dev.suryo.com alpha.dev.suryo.io omega.dev.suryo.us"
+	clean_up
+	exit 0
+}
+
+function get_given_options() {
+	local _option_san=0
+	local _has_error=0
+	case "$1" in
+		'-s'|'--san'|'-san')			_san_cert=1 ; shift ; let _option_san++ ;;
+		'-h'|'--help'|'-help')			help ; exit $_state_ok ;;
+		'-v'|'--version'|'-version')	echo $_echo_flag "$_version" ; exit $_state_ok ;;
+		'-c'|'-cleanup'|'-cleanup')		clean_up_cert ; exit $_state_ok ;;
+	esac
+	(( $_option_san > 1 )) && echo $_echo_flag "\n\t: -s can only be given once." && help
+	[[ -z $1 ]] && help
+	_san_prefix=
+	(( $_option_san == 1 )) && _san_prefix="san-"
+	_given_cert_name="$1"
+	if [[ "$_given_cert_name" =~ ^(wildcard|star|\*).* ]] ; then
+		_my_base_cert_name="${_given_cert_name#*\.}"
+		_my_cert_name="*.${_my_base_cert_name}"
+		_subject_alt_name="DNS:$_my_cert_name"
+		_my_cert_crt=${_san_prefix}wildcard."$_my_base_cert_name".crt
+		_my_cert_key=${_san_prefix}wildcard."$_my_base_cert_name".key
+		_my_cert_csr=${_san_prefix}wildcard."$_my_base_cert_name".csr
+		_my_cert_pass=${_san_prefix}wildcard."$_my_base_cert_name".pass
+	else
+		_my_base_cert_name="$_given_cert_name"
+		_my_cert_name="$_given_cert_name"
+		_subject_alt_name="DNS:$_my_cert_name"
+		_my_cert_crt="${_san_prefix}$_my_cert_name".crt
+		_my_cert_key="${_san_prefix}$_my_cert_name".key
+		_my_cert_csr="${_san_prefix}$_my_cert_name".csr
+		_my_cert_pass="${_san_prefix}$_my_cert_name".pass
+	fi
+	_cert_files="$_my_cert_crt $_my_cert_key $_my_cert_csr $_my_cert_pass ${_my_cert_key}.crypt"
+	if (( $_option_san == 1 )) ; then
+		shift
+		_san_domains="$@"
+		for _san_domain in $_san_domains
+		do
+			_my_san_cert_name="$_san_domain"
+			if [[ "$_my_san_cert_name" =~ ^(wildcard|star|\*).* ]] ; then
+				_my_san_cert_base="${_my_san_cert_name#*\.}"
+				_my_san_cert_name="*.${_my_san_cert_base}"
+			fi
+			_subject_alt_name="$_subject_alt_name, DNS:$_my_san_cert_name"
+		done
+	fi
+	return 0
+}
+
+main "$@"
